@@ -1,7 +1,0 @@
-CREATE TABLE purchases (
-  session_id TEXT PRIMARY KEY,
-  email      TEXT NOT NULL,
-  code_hash  TEXT NOT NULL UNIQUE,
-  revoked    INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);

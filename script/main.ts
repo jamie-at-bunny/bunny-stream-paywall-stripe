@@ -1,5 +1,4 @@
 import * as BunnySDK from "npm:@bunny.net/edgescript-sdk@0.13.0";
-import { connect } from "npm:@bunny.net/database-client";
 import process from "node:process";
 import * as z from "npm:zod@4";
 
@@ -17,13 +16,8 @@ const env = z
     STREAM_TOKEN_KEY: z.string().min(1),
     RESEND_API_KEY: z.string().min(1),
     EMAIL_FROM: z.string().min(1),
-    BUNNY_DATABASE_URL: z.url(),
-    BUNNY_DATABASE_AUTH_TOKEN: z.string().min(1),
   })
   .parse(process.env);
-
-// Reads BUNNY_DATABASE_URL and BUNNY_DATABASE_AUTH_TOKEN from the environment.
-const db = connect();
 
 // ---------------------------------------------------------------------------
 // Signing helpers
@@ -93,7 +87,6 @@ async function hasAccess(request: Request) {
 
 const CheckoutSession = z.object({
   id: z.string(),
-  created: z.number(),
   payment_status: z.enum(["paid", "unpaid", "no_payment_required"]),
   customer_details: z.object({ email: z.email().nullable() }).nullable(),
 });
@@ -125,9 +118,8 @@ async function startCheckout() {
   return redirect(session.url);
 }
 
-const ONE_DAY = 60 * 60 * 24;
-
-// Arriving at the success URL proves nothing, so ask Stripe about the session.
+// Arriving at this URL proves nothing, so ask Stripe about the session. The
+// buyer lands here after paying, and the emailed link points here too.
 async function confirmPurchase(url: URL) {
   const id = url.searchParams.get("session_id");
   if (!id) return redirect("/");
@@ -137,11 +129,8 @@ async function confirmPurchase(url: URL) {
       CheckoutSession,
       `checkout/sessions/${encodeURIComponent(id)}`,
     );
-    const recent = Date.now() / 1000 - session.created < ONE_DAY;
-    if (session.payment_status !== "paid" || !recent) return redirect("/");
+    if (session.payment_status !== "paid") return redirect("/");
 
-    // A paid buyer still gets the cookie when fulfil fails. The webhook retries it.
-    await fulfil(session).catch((error) => console.error("fulfil failed", error));
     return redirect("/watch.html", await accessCookie());
   } catch {
     return redirect("/");
@@ -149,67 +138,29 @@ async function confirmPurchase(url: URL) {
 }
 
 // ---------------------------------------------------------------------------
-// Recording the purchase and emailing an access code
+// Emailing the buyer a link they can use on any device
 // ---------------------------------------------------------------------------
 
-// Called from the success redirect and the webhook, sometimes within the same
-// second, so the insert ignores a session it has already seen and the email
-// only goes out when a new row lands.
-async function fulfil(session: CheckoutSession) {
-  const email = session.customer_details?.email;
-  if (!email) throw new Error(`Session ${session.id} has no email`);
+async function sendLink(session: CheckoutSession) {
+  const to = session.customer_details?.email;
+  if (!to) throw new Error(`Session ${session.id} has no email`);
 
-  const code = crypto.randomUUID().replaceAll("-", "").slice(0, 16).toUpperCase();
-  const result = await db.sql`
-    INSERT INTO purchases (session_id, email, code_hash)
-    VALUES (${session.id}, ${email}, ${await sha256(code)})
-    ON CONFLICT (session_id) DO NOTHING`.run();
-  if (result.rowsAffected !== 1) return;
-
-  try {
-    await sendCode(email, code);
-  } catch (error) {
-    // Only the hash is stored, so an unsent code is lost. Remove the row
-    // and let the next attempt create a fresh one.
-    await db.sql`DELETE FROM purchases WHERE session_id = ${session.id}`.run();
-    throw error;
-  }
-}
-
-async function sendCode(to: string, code: string) {
   const response = await fetch("https://api.resend.com/emails", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${env.RESEND_API_KEY}`,
       "Content-Type": "application/json",
+      // Stripe can deliver an event twice. The key stops a second email.
+      "Idempotency-Key": session.id,
     },
     body: JSON.stringify({
       from: env.EMAIL_FROM,
       to,
-      subject: "Your access code",
-      text: `Thanks for buying. Watch any time at ${env.SITE_URL}/unlock.html with this code: ${code}`,
+      subject: "Your video",
+      text: `Thanks for buying. Watch any time, on any device: ${env.SITE_URL}/thanks?session_id=${session.id}`,
     }),
   });
   if (!response.ok) throw new Error(`Email provider returned ${response.status}`);
-}
-
-// ---------------------------------------------------------------------------
-// Unlocking on another device
-// ---------------------------------------------------------------------------
-
-const AccessCode = z.string().trim().toUpperCase().regex(/^[0-9A-F]{16}$/);
-
-async function unlock(request: Request) {
-  const form = await request.formData();
-  const code = AccessCode.safeParse(form.get("code"));
-  if (!code.success) return redirect("/unlock.html");
-
-  const purchase = await db.sql`
-    SELECT session_id FROM purchases
-    WHERE code_hash = ${await sha256(code.data)} AND revoked = 0`.first();
-
-  if (!purchase) return redirect("/unlock.html");
-  return redirect("/watch.html", await accessCookie());
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +189,7 @@ async function stripeWebhook(request: Request) {
     const event = StripeEvent.parse(JSON.parse(payload));
     if (event.type === "checkout.session.completed") {
       const session = CheckoutSession.parse(event.data.object);
-      if (session.payment_status === "paid") await fulfil(session);
+      if (session.payment_status === "paid") await sendLink(session);
     }
     return new Response("ok");
   } catch (error) {
@@ -276,11 +227,10 @@ BunnySDK.net.http
 
     if (route === "POST /buy") return startCheckout();
     if (route === "GET /thanks") return confirmPurchase(url);
-    if (route === "POST /unlock") return unlock(request);
     if (route === "POST /webhooks/stripe") return stripeWebhook(request);
 
     if (url.pathname === "/watch.html" && !(await hasAccess(request))) {
-      return redirect("/unlock.html");
+      return redirect("/");
     }
 
     return request;

@@ -70,15 +70,11 @@ form {
   margin-bottom: 1rem;
 }
 
-button,
-input {
+button {
   font: inherit;
   padding: 0.8rem 1.25rem;
-  border-radius: 10px;
-}
-
-button {
   border: 0;
+  border-radius: 10px;
   background: var(--accent);
   color: #fff;
   font-weight: 600;
@@ -89,19 +85,7 @@ button:hover {
   background: var(--accent-dark);
 }
 
-input {
-  flex: 1;
-  min-width: 12rem;
-  border: 1px solid var(--line);
-  background: #fff;
-  color: var(--ink);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-}
-
 button:focus-visible,
-input:focus-visible,
 a:focus-visible {
   outline: 3px solid #febe2d;
   outline-offset: 2px;
